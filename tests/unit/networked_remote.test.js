@@ -76,24 +76,13 @@ suite('networked_remote', function() {
     }));
   });
 
-  suite('networkUpdateHandler', function() {
-
-    test('Network handler works', sinon.test(function() {
-      this.spy(component, 'networkUpdate');
-      var data = { detail: { entityData: {test: true}}};
-
-      component.networkUpdateHandler(data);
-
-      assert.isTrue(component.networkUpdate.calledWith({test: true}));
-    }));
-  });
-
   suite('networkUpdate', function() {
 
     test('sets correct data', sinon.test(function() {
       var entityData = {
         networkId: 'nid1',
         owner: 'network1',
+        persistent: false,
         parent: null,
         template: '',
         components: {
@@ -104,23 +93,26 @@ suite('networked_remote', function() {
         }
       }
       component.networkUpdate(entityData);
+      component.tick(15, 15);
 
-      var position = el.getAttribute('position');
-      assert.equal(position.x, 10, 'Position');
-      assert.equal(position.y, 20, 'Position');
-      assert.equal(position.z, 30, 'Position');
+      setTimeout(()=> {        
+        var position = el.getAttribute('position');
+        assert.equal(position.x, 10, 'Position');
+        assert.equal(position.y, 20, 'Position');
+        assert.equal(position.z, 30, 'Position');
 
-      var rotation = el.getAttribute('rotation');
-      assert.equal(rotation.x, 40, 'Rotation');
-      assert.equal(rotation.y, 30, 'Rotation');
-      assert.equal(rotation.z, 20, 'Rotation');
+        var rotation = el.getAttribute('rotation');
+        assert.equal(rotation.x, 40, 'Rotation');
+        assert.equal(rotation.y, 30, 'Rotation');
+        assert.equal(rotation.z, 20, 'Rotation');
 
-      var scale = el.getAttribute('scale');
-      assert.equal(scale.x, 5, 'Scale');
-      assert.equal(scale.y, 12, 'Scale');
-      assert.equal(scale.z, 1, 'Scale');
+        var scale = el.getAttribute('scale');
+        assert.equal(scale.x, 1, 'Scale');
+        assert.equal(scale.y, 1, 'Scale');
+        assert.equal(scale.z, 1, 'Scale');
 
-      assert.equal(el.getAttribute('visible'), false, 'Visible');
+        assert.equal(el.getAttribute('visible'), false, 'Visible');
+      }, 1);
     }));
 
     test('sets correct data with child components', sinon.test(function() {
@@ -128,6 +120,7 @@ suite('networked_remote', function() {
       var entityData = {
         networkId: 'network1',
         owner: 'owner1',
+        persistent: false,
         parent: null,
         template: '',
         components: {
@@ -152,6 +145,7 @@ suite('networked_remote', function() {
       var entityData = {
         networkId: 'network2',
         owner: 'owner1',
+        persistent: false,
         parent: null,
         template: '',
         components: {

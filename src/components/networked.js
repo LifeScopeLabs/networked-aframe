@@ -1,8 +1,10 @@
 /* global AFRAME, NAF, THREE */
 var deepEqual = require('fast-deep-equal');
+var InterpolationBuffer = require('buffered-interpolation');
 var DEG2RAD = THREE.Math.DEG2RAD;
+var OBJECT3D_COMPONENTS = ['position', 'rotation', 'scale'];
 
-function defaultNetworkUpdatePredicate() {
+function defaultRequiresUpdate() {
   let cachedData = null;
 
   return (newData) => {
@@ -19,12 +21,14 @@ AFRAME.registerComponent('networked', {
   schema: {
     template: {default: ''},
     attachTemplateToLocal: { default: true },
+    persistent: { default: false },
 
     networkId: {default: ''},
     owner: {default: ''},
   },
 
   init: function() {
+    this.creator = null;
     this.OWNERSHIP_GAINED = 'ownership-gained';
     this.OWNERSHIP_CHANGED = 'ownership-changed';
     this.OWNERSHIP_LOST = 'ownership-lost';
@@ -41,24 +45,19 @@ AFRAME.registerComponent('networked', {
 
     this.conversionEuler = new THREE.Euler();
     this.conversionEuler.order = "YXZ";
-    this.positionComponents = [];
-    this.scaleComponents = [];
-    this.rotationComponents = [];
+    this.bufferInfos = [];
+    this.bufferPosition = new THREE.Vector3();
+    this.bufferQuaternion = new THREE.Quaternion();
+    this.bufferScale = new THREE.Vector3();
 
     var wasCreatedByNetwork = this.wasCreatedByNetwork();
 
     this.onConnected = this.onConnected.bind(this);
-    
+
     this.syncData = {};
     this.componentSchemas =  NAF.schemas.getComponents(this.data.template);
     this.cachedElements = new Array(this.componentSchemas.length);
-    this.networkUpdatePredicates = this.componentSchemas.map((componentSchema) => {
-      if (componentSchema.requiresNetworkUpdate) {
-        return componentSchema.requiresNetworkUpdate();
-      }
-
-      return defaultNetworkUpdatePredicate();
-    });
+    this.networkUpdatePredicates = this.componentSchemas.map(x => (x.requiresNetworkUpdate && x.requiresNetworkUpdate()) || defaultRequiresUpdate());
 
     // Fill cachedElements array with null elements
     this.invalidateCachedElements();
@@ -171,41 +170,38 @@ AFRAME.registerComponent('networked', {
     return this.data.owner === NAF.clientId;
   },
 
-  tick: function() {
-    if (this.isMine() && this.needsToSync()) {
-      if (!this.el.parentElement){
-        NAF.log.error("tick called on an entity that seems to have been removed");
-        //TODO: Find out why tick is still being called
-        return;
-      }
-      this.syncDirty();
+  update: function(oldData) {
+    if (this.creator === null && this.data.owner) {
+      this.creator = this.data.owner;
     }
+  },
 
-    var now = Date.now();
-
-    if (!this.isMine()) {
-      for (var i = 0; i < this.positionComponents.length; i++) {
-        var posComp = this.positionComponents[i];
-        var posElapsed = now - posComp.lastUpdated;
-        var posProgress = posComp.duration === 0 ? 1 : posElapsed / posComp.duration;
-        posProgress = THREE.Math.clamp(posProgress, 0, 1);
-        posComp.el.object3D.position.lerpVectors(posComp.start, posComp.target, posProgress);
+  tick: function(time, dt) {
+    if (this.isMine()) {
+      if (this.needsToSync()) {
+        if (!this.el.parentElement) {
+          NAF.log.error("tick called on an entity that seems to have been removed");
+          //TODO: Find out why tick is still being called
+          return;
+        }
+        this.syncDirty();
       }
-
-      for (var j = 0; j < this.rotationComponents.length; j++) {
-        var rotComp = this.rotationComponents[j];
-        var rotElapsed = now - rotComp.lastUpdated;
-        var rotProgress = rotComp.duration === 0 ? 1 : rotElapsed / rotComp.duration;
-        rotProgress = THREE.Math.clamp(rotProgress, 0, 1);
-        THREE.Quaternion.slerp(rotComp.start, rotComp.target, rotComp.el.object3D.quaternion, rotProgress);
-      }
-
-      for (var k = 0; k < this.scaleComponents.length; k++) {
-        var scaleComp = this.scaleComponents[k];
-        var scaleElapsed = now - scaleComp.lastUpdated;
-        var scaleProgress = scaleComp.duration === 0 ? 1 : scaleElapsed / scaleComp.duration;
-        scaleProgress = THREE.Math.clamp(scaleProgress, 0, 1);
-        scaleComp.el.object3D.scale.lerpVectors(scaleComp.start, scaleComp.target, scaleProgress);
+    } else if (NAF.options.useLerp) {
+      for (var i = 0; i < this.bufferInfos.length; i++) {
+        var bufferInfo = this.bufferInfos[i];
+        var buffer = bufferInfo.buffer;
+        var object3D = bufferInfo.object3D;
+        var componentNames = bufferInfo.componentNames;
+        buffer.update(dt);
+        if (componentNames.includes('position')) {
+          object3D.position.copy(buffer.getPosition());
+        }
+        if (componentNames.includes('rotation')) {
+          object3D.quaternion.copy(buffer.getQuaternion());
+        }
+        if (componentNames.includes('scale')) {
+          object3D.scale.copy(buffer.getScale());
+        }
       }
     }
   },
@@ -236,7 +232,7 @@ AFRAME.registerComponent('networked', {
     }
 
     this.updateNextSyncTime();
-    
+
     var components = this.gatherComponentsData(false);
 
     if (components === null) {
@@ -315,6 +311,7 @@ AFRAME.registerComponent('networked', {
     syncData.owner = data.owner;
     syncData.lastOwnerTime = this.lastOwnerTime;
     syncData.template = data.template;
+    syncData.persistent = data.persistent;
     syncData.parent = this.getParentId();
     syncData.components = components;
     syncData.isFirstSync = !!isFirstSync;
@@ -326,11 +323,11 @@ AFRAME.registerComponent('networked', {
   },
 
   needsToSync: function() {
-    return NAF.utils.now() >= this.nextSyncTime;
+    return this.el.sceneEl.clock.elapsedTime >= this.nextSyncTime;
   },
 
   updateNextSyncTime: function() {
-    this.nextSyncTime = NAF.utils.now() + 1000 / NAF.options.updateRate;
+    this.nextSyncTime = this.el.sceneEl.clock.elapsedTime + 1 / NAF.options.updateRate;
   },
 
   getParentId: function() {
@@ -357,6 +354,9 @@ AFRAME.registerComponent('networked', {
 
       const oldOwner = this.data.owner;
       const newOwner = entityData.owner;
+
+      this.el.setAttribute('networked', { owner: entityData.owner });
+
       if (wasMine) {
         this.onOwnershipLostEvent.newOwner = newOwner;
         this.el.emit(this.OWNERSHIP_LOST, this.onOwnershipLostEvent);
@@ -364,113 +364,73 @@ AFRAME.registerComponent('networked', {
       this.onOwnershipChangedEvent.oldOwner = oldOwner;
       this.onOwnershipChangedEvent.newOwner = newOwner;
       this.el.emit(this.OWNERSHIP_CHANGED, this.onOwnershipChangedEvent);
-
-      this.el.setAttribute('networked', { owner: entityData.owner });
-    }    
-    this.updateComponents(entityData.components);
+    }
+    if (this.data.persistent !== entityData.persistent) {
+      this.el.setAttribute('networked', { persistent: entityData.persistent });
+    }
+    this.updateNetworkedComponents(entityData.components);
   },
 
-  updateComponents: function(components) {
+  updateNetworkedComponents: function(components) {
     for (var componentIndex in components) {
       var componentData = components[componentIndex];
       var componentSchema = this.componentSchemas[componentIndex];
       var componentElement = this.getCachedElement(componentIndex);
 
-      if (componentElement === null) {
+      if (componentElement === null || componentData === null ) {
         continue;
       }
 
       if (componentSchema.component) {
-        var shouldLerp = componentSchema.lerp !== false;
-
         if (componentSchema.property) {
-          var singlePropertyData = {
-            [componentSchema.property]: componentData
-          };
-          this.updateComponent(componentElement, componentSchema.component, singlePropertyData, shouldLerp);
+          var singlePropertyData = { [componentSchema.property]: componentData };
+          this.updateNetworkedComponent(componentElement, componentSchema.component, singlePropertyData);
         } else {
-          this.updateComponent(componentElement, componentSchema.component, componentData, shouldLerp);
-          }
-        } else {
-        this.updateComponent(componentElement, componentSchema, componentData, true);
+          this.updateNetworkedComponent(componentElement, componentSchema.component, componentData);
+        }
+      } else {
+        this.updateNetworkedComponent(componentElement, componentSchema, componentData);
       }
     }
   },
 
-  updateComponent: function (el, componentName, data, lerp) {
-    if (!NAF.options.useLerp || !lerp) {
-      return el.setAttribute(componentName, data);
+  updateNetworkedComponent: function (el, componentName, data) {
+    if(!NAF.options.useLerp || !OBJECT3D_COMPONENTS.includes(componentName)) {
+      el.setAttribute(componentName, data);
+      return;
     }
 
-    var now = Date.now();
+    var bufferInfo = this.bufferInfos.find((info) => info.object3D === el.object3D);
+    if (!bufferInfo) {
+      bufferInfo = { buffer: new InterpolationBuffer(InterpolationBuffer.MODE_LERP, 0.1),
+                     object3D: el.object3D,
+                     componentNames: [componentName] };
+      this.bufferInfos.push(bufferInfo);
+    } else {
+      var componentNames = bufferInfo.componentNames;
+      if (!componentNames.includes(componentName)) {
+        componentNames.push(componentName);
+      }
+    }
+    var buffer = bufferInfo.buffer;
 
     switch(componentName) {
-      case "position":
-        var posComp = this.positionComponents.find((item) => item.el === el);
-
-        if (!posComp) {
-          posComp = {};
-          posComp.el = el;
-          posComp.start = new THREE.Vector3(data.x, data.y, data.z);
-          posComp.target = new THREE.Vector3(data.x, data.y, data.z);
-          posComp.lastUpdated = Date.now();
-          posComp.duration = 1;
-          this.positionComponents.push(posComp);
-        } else {
-          posComp.start.copy(posComp.target);
-          posComp.target.set(data.x, data.y, data.z);
-          posComp.duration = now - posComp.lastUpdated;
-          posComp.lastUpdated = now;
-        }
-        break;
-      case "rotation":
-        var rotComp = this.rotationComponents.find((item) => item.el === el);
-
-        if (!rotComp) {
-          rotComp = {};
-          rotComp.el = el;
-          this.conversionEuler.set(DEG2RAD * data.x, DEG2RAD * data.y, DEG2RAD * data.z);
-          rotComp.start = new THREE.Quaternion().setFromEuler(this.conversionEuler);
-          rotComp.target = new THREE.Quaternion().setFromEuler(this.conversionEuler);
-          rotComp.lastUpdated = Date.now();
-          rotComp.duration = 1;
-          this.rotationComponents.push(rotComp);
-        } else {
-          rotComp.start.copy(rotComp.target);
-          this.conversionEuler.set(DEG2RAD * data.x, DEG2RAD * data.y, DEG2RAD * data.z);
-          rotComp.target.setFromEuler(this.conversionEuler);
-          rotComp.duration = now - rotComp.lastUpdated;
-          rotComp.lastUpdated = now;
-        }
-        break;
-      case "scale":
-        var scaleComp = this.scaleComponents.find((item) => item.el === el);
-
-        if (!scaleComp) {
-          scaleComp = {};
-          scaleComp.el = el;
-          scaleComp.start = new THREE.Vector3(data.x, data.y, data.z);
-          scaleComp.target = new THREE.Vector3(data.x, data.y, data.z);
-          scaleComp.lastUpdated = Date.now();
-          scaleComp.duration = 1;
-          this.scaleComponents.push(scaleComp);
-        } else {
-          scaleComp.start.copy(scaleComp.target);
-          scaleComp.target.set(data.x, data.y, data.z);
-          scaleComp.duration = now - scaleComp.lastUpdated;
-          scaleComp.lastUpdated = now;
-        }
-        break;
-      default:
-        el.setAttribute(componentName, data);
-        break;
+      case 'position':
+        buffer.setPosition(this.bufferPosition.set(data.x, data.y, data.z));
+        return;
+      case 'rotation':
+        this.conversionEuler.set(DEG2RAD * data.x, DEG2RAD * data.y, DEG2RAD * data.z);
+        buffer.setQuaternion(this.bufferQuaternion.setFromEuler(this.conversionEuler));
+        return;
+      case 'scale':
+        buffer.setScale(this.bufferScale.set(data.x, data.y, data.z));
+        return;
     }
+    NAF.log.error('Could not set value in interpolation buffer.', el, componentName, data, bufferInfo);
   },
 
   removeLerp: function() {
-    this.positionComponents = [];
-    this.rotationComponents = [];
-    this.scaleComponents = [];
+    this.bufferInfos = [];
   },
 
   remove: function () {

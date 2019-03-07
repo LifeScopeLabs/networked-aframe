@@ -50,7 +50,8 @@ class NetworkEntities {
     var networkData = {
       template: entityData.template,
       owner: entityData.owner,
-      networkId: entityData.networkId
+      networkId: entityData.networkId,
+      persistent: entityData.persistent
     };
 
     entity.setAttribute('networked', networkData);
@@ -136,10 +137,17 @@ class NetworkEntities {
   removeEntitiesOfClient(clientId) {
     var entityList = [];
     for (var id in this.entities) {
-      var entityOwner = NAF.utils.getNetworkOwner(this.entities[id]);
-      if (entityOwner == clientId) {
-        var entity = this.removeEntity(id);
-        entityList.push(entity);
+      var entityCreator = NAF.utils.getCreator(this.entities[id]);
+      if (entityCreator === clientId) {
+        let persists;
+        const component = this.entities[id].getAttribute('networked');
+        if (component && component.persistent) {
+          persists = NAF.utils.takeOwnership(this.entities[id]);
+        }
+        if (!persists) {
+          var entity = this.removeEntity(id);
+          entityList.push(entity);
+        }
       }
     }
     return entityList;
